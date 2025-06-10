@@ -1,0 +1,428 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
+import { config } from './config';
+import { db, initializeDatabase } from './database';
+import { loqateService } from './services/loqateService';
+import { smartSearchService } from './services/smartSearchService';
+// import routes from './routes';
+
+const app = express();
+
+app.use(helmet());
+app.use(cors({
+  origin: config.CORS_ORIGIN,
+  credentials: true
+}));
+app.use(express.json());
+
+// Routes
+// app.use('/api', routes);
+
+// Error handling
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
+});
+
+async function start() {
+  await initializeDatabase();
+  
+  app.listen(config.PORT, () => {
+    console.log(`Server running on http://localhost:${config.PORT}`);
+  });
+}
+
+// Login endpoint
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    const user = await db('users')
+      .where({ username })
+      .first();
+
+    if (!user || !user.is_active) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role
+      },
+      config.JWT_SECRET,
+      { expiresIn: config.JWT_EXPIRY }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get all members
+app.get('/api/members', async (req, res) => {
+  try {
+    const members = await db('members')
+      .select('members.*', 'membership_types.name as membership_type_name')
+      .leftJoin('membership_types', 'members.membership_type_id', 'membership_types.id')
+      .orderBy('created_at', 'desc');
+
+    res.json(members);
+  } catch (error) {
+    console.error('Error fetching members:', error);
+    res.status(500).json({ error: 'Failed to fetch members' });
+  }
+});
+
+// Get membership types
+app.get('/api/membership-types', async (req, res) => {
+  try {
+    const types = await db('membership_types')
+      .select('*')
+      .where('is_active', true)
+      .orderBy('name');
+
+    res.json(types);
+  } catch (error) {
+    console.error('Error fetching membership types:', error);
+    res.status(500).json({ error: 'Failed to fetch membership types' });
+  }
+});
+
+// Create new member
+app.post('/api/members', async (req, res) => {
+  try {
+    const memberData = req.body;
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+
+    // Get the membership type to determine the ID prefix
+    const membershipType = await db('membership_types')
+      .where({ id: memberData.membership_type_id })
+      .first();
+
+    if (!membershipType) {
+      return res.status(400).json({ error: 'Invalid membership type' });
+    }
+
+    // Perform AML check
+    console.log('Performing AML check for:', memberData.first_name, memberData.last_name);
+    const amlResult = await smartSearchService.checkAML({
+      firstName: memberData.first_name,
+      lastName: memberData.last_name,
+      dateOfBirth: memberData.date_of_birth
+    });
+
+    console.log('AML check result:', amlResult);
+
+    // Generate member number
+    const lastMember = await db('members')
+      .where('member_number', 'like', `${membershipType.id_prefix}%`)
+      .orderBy('member_number', 'desc')
+      .first();
+
+    let nextNumber = membershipType.id_prefix;
+    if (lastMember) {
+      const lastNum = parseInt(lastMember.member_number);
+      nextNumber = (lastNum + 1).toString();
+    }
+
+    // Create member
+    const [member] = await db('members').insert({
+      ...memberData,
+      member_number: nextNumber,
+      status: 'pending',
+      aml_check_status: amlResult.status,
+      aml_check_date: new Date(),
+      created_by: decoded.id,
+      created_at: new Date(),
+      updated_at: new Date()
+    }).returning('*');
+
+    res.json(member);
+  } catch (error) {
+    console.error('Error creating member:', error);
+    res.status(500).json({ error: 'Failed to create member' });
+  }
+});
+
+// Approve member
+app.put('/api/members/:id/approve', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+
+    // Check if user has approval permission (admin or approver)
+    if (decoded.role !== 'admin' && decoded.role !== 'approver') {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
+    // Update member status
+    const [member] = await db('members')
+      .where({ id })
+      .update({
+        status: 'approved',
+        approved_by: decoded.id,
+        approval_date: new Date(),
+        updated_at: new Date()
+      })
+      .returning('*');
+
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    // Log the approval action
+    await db('audit_logs').insert({
+      user_id: decoded.id,
+      action: 'APPROVE_MEMBER',
+      entity_type: 'member',
+      entity_id: id,
+      created_at: new Date()
+    });
+
+    res.json(member);
+  } catch (error) {
+    console.error('Error approving member:', error);
+    res.status(500).json({ error: 'Failed to approve member' });
+  }
+});
+
+// Reject member
+app.put('/api/members/:id/reject', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+
+    // Check if user has approval permission
+    if (decoded.role !== 'admin' && decoded.role !== 'approver') {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+
+    // Update member status
+    const [member] = await db('members')
+      .where({ id })
+      .update({
+        status: 'rejected',
+        approved_by: decoded.id,
+        approval_date: new Date(),
+        updated_at: new Date()
+      })
+      .returning('*');
+
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    // Log the rejection
+    await db('audit_logs').insert({
+      user_id: decoded.id,
+      action: 'REJECT_MEMBER',
+      entity_type: 'member',
+      entity_id: id,
+      new_values: { reason },
+      created_at: new Date()
+    });
+
+    res.json(member);
+  } catch (error) {
+    console.error('Error rejecting member:', error);
+    res.status(500).json({ error: 'Failed to reject member' });
+  }
+});
+
+// Address lookup endpoint
+app.get('/api/address/lookup', async (req, res) => {
+  try {
+    const { postcode } = req.query;
+    
+    if (!postcode) {
+      return res.status(400).json({ error: 'Postcode is required' });
+    }
+    
+    const addresses = await loqateService.findAddresses(postcode as string);
+    res.json(addresses);
+  } catch (error) {
+    console.error('Address lookup error:', error);
+    res.status(500).json({ error: 'Failed to lookup address' });
+  }
+});
+
+// Get card templates
+app.get('/api/card-templates', async (req, res) => {
+  try {
+    const templates = await db('card_templates')
+      .select('card_templates.*', 'membership_types.name as membership_type_name')
+      .leftJoin('membership_types', 'card_templates.membership_type_id', 'membership_types.id')
+      .where('card_templates.is_active', true)
+      .orderBy('card_templates.created_at', 'desc');
+    
+    res.json(templates);
+  } catch (error) {
+    console.error('Error fetching card templates:', error);
+    res.status(500).json({ error: 'Failed to fetch card templates' });
+  }
+});
+
+// Create/update card template
+app.post('/api/card-templates', async (req, res) => {
+  try {
+    const { membership_type_id, template_name, template_data } = req.body;
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+    
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    // Check if template exists for this membership type
+    const existing = await db('card_templates')
+      .where({ membership_type_id })
+      .first();
+    
+    if (existing) {
+      // Update existing template
+      const [updated] = await db('card_templates')
+        .where({ id: existing.id })
+        .update({
+          template_name,
+          template_data,
+          updated_at: new Date()
+        })
+        .returning('*');
+      
+      res.json(updated);
+    } else {
+      // Create new template
+      const [created] = await db('card_templates')
+        .insert({
+          membership_type_id,
+          template_name,
+          template_data,
+          is_active: true,
+          created_at: new Date(),
+          updated_at: new Date()
+        })
+        .returning('*');
+      
+      res.json(created);
+    }
+  } catch (error) {
+    console.error('Error saving card template:', error);
+    res.status(500).json({ error: 'Failed to save card template' });
+  }
+});
+
+// Get template for specific membership type
+app.get('/api/card-templates/type/:typeId', async (req, res) => {
+  try {
+    const { typeId } = req.params;
+    
+    const template = await db('card_templates')
+      .where({ 
+        membership_type_id: typeId,
+        is_active: true 
+      })
+      .first();
+    
+    res.json(template || null);
+  } catch (error) {
+    console.error('Error fetching template:', error);
+    res.status(500).json({ error: 'Failed to fetch template' });
+  }
+});
+
+// Create test users endpoint (admin only)
+app.post('/api/users/create-test-users', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    // Create one user for each role
+    const testUsers = [
+      { username: 'dataentry', email: 'dataentry@membership.com', role: 'data-entry' },
+      { username: 'printer', email: 'printer@membership.com', role: 'printer' },
+      { username: 'editor', email: 'editor@membership.com', role: 'editor' },
+      { username: 'approver', email: 'approver@membership.com', role: 'approver' }
+    ];
+
+    const hashedPassword = await bcrypt.hash('test123', 10);
+    const createdUsers = [];
+
+    for (const user of testUsers) {
+      // Check if user already exists
+      const existing = await db('users').where({ username: user.username }).first();
+      if (!existing) {
+        const [newUser] = await db('users').insert({
+          ...user,
+          password_hash: hashedPassword,
+          is_active: true
+        }).returning(['username', 'email', 'role']);
+        createdUsers.push(newUser);
+      }
+    }
+
+    res.json({
+      message: 'Test users created',
+      users: createdUsers,
+      note: 'All users have password: test123'
+    });
+  } catch (error) {
+    console.error('Error creating test users:', error);
+    res.status(500).json({ error: 'Failed to create test users' });
+  }
+});
+
+start().catch(console.error);
