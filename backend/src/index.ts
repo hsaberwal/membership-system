@@ -7,6 +7,7 @@ import { config } from './config';
 import { db, initializeDatabase } from './database';
 import { loqateService } from './services/loqateService';
 import { smartSearchService } from './services/smartSearchService';
+import { auditLogger } from './middlewares/auditLogger';
 // import routes from './routes';
 
 const app = express();
@@ -17,7 +18,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
-
+app.use(auditLogger);
 // Routes
 // app.use('/api', routes);
 
@@ -372,6 +373,284 @@ app.get('/api/card-templates/type/:typeId', async (req, res) => {
   } catch (error) {
     console.error('Error fetching template:', error);
     res.status(500).json({ error: 'Failed to fetch template' });
+  }
+});
+
+// Get all events
+app.get('/api/events', async (req, res) => {
+  try {
+    const events = await db('events')
+      .select('events.*')
+      .select(db.raw('COUNT(DISTINCT event_attendance.member_id) as attendee_count'))
+      .leftJoin('event_attendance', 'events.id', 'event_attendance.event_id')
+      .groupBy('events.id')
+      .orderBy('events.event_date', 'desc')
+      .orderBy('events.start_time', 'desc');
+    
+    res.json(events);
+  } catch (error) {
+    console.error('Error fetching events:', error);
+    res.status(500).json({ error: 'Failed to fetch events' });
+  }
+});
+
+// Create event
+app.post('/api/events', async (req, res) => {
+  try {
+    const eventData = req.body;
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+    
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    const [event] = await db('events').insert({
+      ...eventData,
+      created_by: decoded.id,
+      created_at: new Date()
+    }).returning('*');
+    
+    res.json(event);
+  } catch (error) {
+    console.error('Error creating event:', error);
+    res.status(500).json({ error: 'Failed to create event' });
+  }
+});
+
+// Get event details with attendees
+app.get('/api/events/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const event = await db('events')
+      .where({ id })
+      .first();
+    
+    if (!event) {
+      return res.status(404).json({ error: 'Event not found' });
+    }
+    
+    const attendees = await db('event_attendance')
+      .select('members.*', 'event_attendance.check_in_time')
+      .join('members', 'event_attendance.member_id', 'members.id')
+      .where('event_attendance.event_id', id)
+      .orderBy('event_attendance.check_in_time', 'desc');
+    
+    res.json({ ...event, attendees });
+  } catch (error) {
+    console.error('Error fetching event:', error);
+    res.status(500).json({ error: 'Failed to fetch event details' });
+  }
+});
+
+// Check-in member to event
+app.post('/api/events/:id/checkin', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { memberNumber } = req.body;
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+    
+    // Find member by number
+    const member = await db('members')
+      .where({ member_number: memberNumber })
+      .first();
+    
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+    
+    if (member.status !== 'approved') {
+      return res.status(400).json({ error: 'Member is not approved' });
+    }
+    
+    // Check if already checked in
+    const existing = await db('event_attendance')
+      .where({
+        event_id: id,
+        member_id: member.id
+      })
+      .first();
+    
+    if (existing) {
+      return res.status(400).json({ error: 'Member already checked in' });
+    }
+    
+    // Create attendance record
+    const [attendance] = await db('event_attendance').insert({
+      event_id: id,
+      member_id: member.id,
+      checked_in_by: decoded.id,
+      check_in_time: new Date()
+    }).returning('*');
+    
+    res.json({
+      success: true,
+      member: {
+        name: `${member.first_name} ${member.last_name}`,
+        member_number: member.member_number,
+        membership_type: member.membership_type_id
+      }
+    });
+  } catch (error) {
+    console.error('Error checking in member:', error);
+    res.status(500).json({ error: 'Failed to check in member' });
+  }
+});
+
+// Get all users (admin only)
+app.get('/api/users', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+    
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    const users = await db('users')
+      .select('id', 'username', 'email', 'role', 'is_active', 'created_at')
+      .orderBy('created_at', 'desc');
+    
+    res.json(users);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+// Create new user (admin only)
+app.post('/api/users', async (req, res) => {
+  try {
+    const { username, email, password, role } = req.body;
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+    
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    // Check if username or email already exists
+    const existing = await db('users')
+      .where({ username })
+      .orWhere({ email })
+      .first();
+    
+    if (existing) {
+      return res.status(400).json({ error: 'Username or email already exists' });
+    }
+    
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // Create user
+    const [user] = await db('users').insert({
+      username,
+      email,
+      password_hash: hashedPassword,
+      role,
+      is_active: true,
+      created_at: new Date(),
+      updated_at: new Date()
+    }).returning(['id', 'username', 'email', 'role']);
+    
+    res.json(user);
+  } catch (error) {
+    console.error('Error creating user:', error);
+    res.status(500).json({ error: 'Failed to create user' });
+  }
+});
+
+// Update user status (admin only)
+app.patch('/api/users/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_active } = req.body;
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+    
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    // Don't allow disabling your own account
+    if (decoded.id === id && !is_active) {
+      return res.status(400).json({ error: 'Cannot deactivate your own account' });
+    }
+    
+    const [updated] = await db('users')
+      .where({ id })
+      .update({
+        is_active,
+        updated_at: new Date()
+      })
+      .returning('*');
+    
+    res.json(updated);
+  } catch (error) {
+    console.error('Error updating user status:', error);
+    res.status(500).json({ error: 'Failed to update user status' });
+  }
+});
+
+// Reset user password (admin only)
+app.post('/api/users/:id/reset-password', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+    
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+    
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    // Generate new password
+    const newPassword = 'Pass' + Math.random().toString(36).slice(-8);
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    
+    // Update password
+    await db('users')
+      .where({ id })
+      .update({
+        password_hash: hashedPassword,
+        updated_at: new Date()
+      });
+    
+    res.json({ newPassword });
+  } catch (error) {
+    console.error('Error resetting password:', error);
+    res.status(500).json({ error: 'Failed to reset password' });
   }
 });
 

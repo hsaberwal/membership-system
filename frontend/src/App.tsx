@@ -8,6 +8,9 @@ import { AddMemberPage } from './pages/AddMemberPage';
 import { ApprovalPage } from './pages/ApprovalPage';
 import { CardDesignerPage } from './pages/CardDesignerPage';
 import { PrintCardsPage } from './pages/PrintCardsPage';
+import { EventsPage } from './pages/EventsPage';
+import { EventCheckInPage } from './pages/EventCheckInPage';
+import { UserManagementPage } from './pages/UserManagementPage';
 
 const queryClient = new QueryClient();
 
@@ -25,6 +28,9 @@ function App() {
             <Route path="/approvals" element={<ApprovalPage />} />
             <Route path="/card-designer" element={<CardDesignerPage />} />
             <Route path="/print" element={<PrintCardsPage />} />
+            <Route path="/events" element={<EventsPage />} />
+            <Route path="/events/:id/checkin" element={<EventCheckInPage />} />
+            <Route path="/users" element={<UserManagementPage />} />
           </Routes>
           <Toaster position="top-right" />
         </div>

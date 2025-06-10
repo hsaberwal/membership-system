@@ -50,6 +50,11 @@ export function Navigation({ title }: NavigationProps) {
       label: 'Events',
       path: '/events',
       roles: ['admin']
+    },
+    {
+      label: 'Users',
+      path: '/users',
+      roles: ['admin']
     }
   ];
 
