@@ -654,6 +654,23 @@ app.post('/api/users/:id/reset-password', async (req, res) => {
   }
 });
 
+// Get audit logs
+app.get('/api/audit-logs', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'No token' });
+  
+  const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+  if (decoded.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  
+  const logs = await db('audit_logs')
+    .select('audit_logs.*', 'users.username')
+    .leftJoin('users', 'audit_logs.user_id', 'users.id')
+    .orderBy('audit_logs.created_at', 'desc')
+    .limit(100);
+    
+  res.json(logs);
+});
+
 // Create test users endpoint (admin only)
 app.post('/api/users/create-test-users', async (req, res) => {
   try {

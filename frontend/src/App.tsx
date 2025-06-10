@@ -11,6 +11,7 @@ import { PrintCardsPage } from './pages/PrintCardsPage';
 import { EventsPage } from './pages/EventsPage';
 import { EventCheckInPage } from './pages/EventCheckInPage';
 import { UserManagementPage } from './pages/UserManagementPage';
+import { AuditLogsPage } from './pages/AuditLogsPage';
 
 const queryClient = new QueryClient();
 
@@ -31,6 +32,7 @@ function App() {
             <Route path="/events" element={<EventsPage />} />
             <Route path="/events/:id/checkin" element={<EventCheckInPage />} />
             <Route path="/users" element={<UserManagementPage />} />
+            <Route path="/audit-logs" element={<AuditLogsPage />} />
           </Routes>
           <Toaster position="top-right" />
         </div>

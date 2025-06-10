@@ -55,7 +55,12 @@ export function Navigation({ title }: NavigationProps) {
       label: 'Users',
       path: '/users',
       roles: ['admin']
-    }
+    },
+    {
+      label: 'Audit Logs',
+      path: '/audit-logs',
+      roles: ['admin']
+    },
   ];
 
   return (
