@@ -9,6 +9,7 @@ import { loqateService } from './services/loqateService';
 import { smartSearchService } from './services/smartSearchService';
 import { auditLogger } from './middlewares/auditLogger';
 import { generateNextMemberNumber } from './utils/generateNextMemberNumber';
+import countriesRouter from './routes/countries';
 // import routes from './routes';
 
 const app = express();
@@ -36,6 +37,9 @@ async function start() {
     console.log(`Server running on http://localhost:${config.PORT}`);
   });
 }
+
+// use countries
+app.use('/api/countries', countriesRouter);
 
 // Login endpoint
 app.post('/api/auth/login', async (req, res) => {
@@ -111,7 +115,7 @@ app.get('/api/membership-types', async (req, res) => {
   }
 });
 
-// Create new member
+// Member creation endpoint with validation
 app.post('/api/members', async (req, res) => {
   try {
     const memberData = req.body;
@@ -122,6 +126,54 @@ app.post('/api/members', async (req, res) => {
     }
 
     const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+
+    // Validate required fields
+    const requiredFields = [
+      'first_name',
+      'last_name',
+      'date_of_birth',
+      'membership_type_id',
+      'id_document_type',
+      'id_document_number',
+      'id_document_provider', // NEW
+      'address_line1',
+      'city',
+      'postal_code',
+      'country'
+    ];
+
+    for (const field of requiredFields) {
+      if (!memberData[field]) {
+        return res.status(400).json({ error: `${field} is required` });
+      }
+    }
+
+    // Validate email if provided (optional field)
+    if (memberData.email) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(memberData.email)) {
+        return res.status(400).json({ error: 'Invalid email format' });
+      }
+    }
+
+    // Validate ILR field based on ID document provider
+    if (memberData.id_document_provider === 'United Kingdom') {
+      // For UK documents, ILR should be false or undefined
+      if (memberData.indefinite_leave_to_remain === true) {
+        return res.status(400).json({ 
+          error: 'Indefinite Leave to Remain cannot be selected for UK documents' 
+        });
+      }
+      // Ensure it's set to false for UK documents
+      memberData.indefinite_leave_to_remain = false;
+    } else {
+      // For non-UK documents, ILR field is required
+      if (memberData.indefinite_leave_to_remain === undefined || memberData.indefinite_leave_to_remain === null) {
+        return res.status(400).json({ 
+          error: 'Indefinite Leave to Remain status is required for non-UK documents' 
+        });
+      }
+    }
 
     // Get the membership type to determine the ID prefix
     const membershipType = await db('membership_types')
@@ -145,9 +197,23 @@ app.post('/api/members', async (req, res) => {
     // Generate member number
     const nextNumber = await generateNextMemberNumber(membershipType.id);
 
-    // Create member
+    // Create member with validated data
     const [member] = await db('members').insert({
-      ...memberData,
+      first_name: memberData.first_name,
+      last_name: memberData.last_name,
+      email: memberData.email || null, // NEW - set to null if not provided
+      date_of_birth: memberData.date_of_birth,
+      membership_type_id: memberData.membership_type_id,
+      id_document_type: memberData.id_document_type,
+      id_document_number: memberData.id_document_number,
+      id_document_provider: memberData.id_document_provider, // NEW
+      indefinite_leave_to_remain: memberData.indefinite_leave_to_remain || false, // NEW
+      address_line1: memberData.address_line1,
+      address_line2: memberData.address_line2 || null,
+      city: memberData.city,
+      postal_code: memberData.postal_code,
+      country: memberData.country,
+      photo_url: memberData.photo_url || null,
       member_number: nextNumber,
       status: 'pending',
       aml_check_status: amlResult.status,
@@ -164,59 +230,76 @@ app.post('/api/members', async (req, res) => {
   }
 });
 
-// Approve member
-app.put('/api/members/:id/approve', async (req, res) => {
+app.get('/api/members', async (req, res) => {
   try {
-    const { id } = req.params;
-    const token = req.headers.authorization?.split(' ')[1];
+    const members = await db('members')
+      .select(
+        'members.*',
+        'membership_types.name as membership_type_name',
+        'membership_types.fee as membership_fee'
+      )
+      .leftJoin('membership_types', 'members.membership_type_id', 'membership_types.id')
+      .where('members.deleted_at', null)
+      .orderBy('members.created_at', 'desc');
 
-    if (!token) {
-      return res.status(401).json({ error: 'No token provided' });
-    }
-
-    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
-
-    // Check if user has approval permission (admin or approver)
-    if (decoded.role !== 'admin' && decoded.role !== 'approver') {
-      return res.status(403).json({ error: 'Insufficient permissions' });
-    }
-
-    // Update member status
-    const [member] = await db('members')
-      .where({ id })
-      .update({
-        status: 'approved',
-        approved_by: decoded.id,
-        approval_date: new Date(),
-        updated_at: new Date()
-      })
-      .returning('*');
-
-    if (!member) {
-      return res.status(404).json({ error: 'Member not found' });
-    }
-
-    // Log the approval action
-    await db('audit_logs').insert({
-      user_id: decoded.id,
-      action: 'APPROVE_MEMBER',
-      entity_type: 'member',
-      entity_id: id,
-      created_at: new Date()
-    });
-
-    res.json(member);
+    res.json(members);
   } catch (error) {
-    console.error('Error approving member:', error);
-    res.status(500).json({ error: 'Failed to approve member' });
+    console.error('Error fetching members:', error);
+    res.status(500).json({ error: 'Failed to fetch members' });
   }
 });
 
-// Reject member
-app.put('/api/members/:id/reject', async (req, res) => {
+// Get member by ID
+app.get('/api/members/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { reason } = req.body;
+    
+    const member = await db('members')
+      .select(
+        'members.*',
+        'membership_types.name as membership_type_name',
+        'membership_types.fee as membership_fee'
+      )
+      .leftJoin('membership_types', 'members.membership_type_id', 'membership_types.id')
+      .where('members.id', id)
+      .andWhere('members.deleted_at', null)
+      .first();
+
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    res.json(member);
+  } catch (error) {
+    console.error('Error fetching member:', error);
+    res.status(500).json({ error: 'Failed to fetch member' });
+  }
+});
+
+// Get Membership Type by ID
+app.get('/api/membership-types/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const type = await db('membership_types')
+      .where({ id })
+      .first();
+
+    if (!type) {
+      return res.status(404).json({ error: 'Membership type not found' });
+    }
+
+    res.json(type);
+  } catch (error) {
+    console.error('Error fetching membership type:', error);
+    res.status(500).json({ error: 'Failed to fetch membership type' });
+  }
+});
+// Update member endpoint
+app.put('/api/members/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
     const token = req.headers.authorization?.split(' ')[1];
 
     if (!token) {
@@ -225,40 +308,42 @@ app.put('/api/members/:id/reject', async (req, res) => {
 
     const decoded = jwt.verify(token, config.JWT_SECRET) as any;
 
-    // Check if user has approval permission
-    if (decoded.role !== 'admin' && decoded.role !== 'approver') {
-      return res.status(403).json({ error: 'Insufficient permissions' });
+    // Validate email if provided
+    if (updateData.email) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(updateData.email)) {
+        return res.status(400).json({ error: 'Invalid email format' });
+      }
     }
 
-    // Update member status
-    const [member] = await db('members')
+    // Validate ILR field if id_document_provider is being updated
+    if (updateData.id_document_provider !== undefined) {
+      if (updateData.id_document_provider === 'United Kingdom') {
+        updateData.indefinite_leave_to_remain = false;
+      } else if (updateData.indefinite_leave_to_remain === undefined) {
+        return res.status(400).json({ 
+          error: 'Indefinite Leave to Remain status is required for non-UK documents' 
+        });
+      }
+    }
+
+    const [updated] = await db('members')
       .where({ id })
       .update({
-        status: 'rejected',
-        approved_by: decoded.id,
-        approval_date: new Date(),
-        updated_at: new Date()
+        ...updateData,
+        updated_at: new Date(),
+        updated_by: decoded.id
       })
       .returning('*');
 
-    if (!member) {
+    if (!updated) {
       return res.status(404).json({ error: 'Member not found' });
     }
 
-    // Log the rejection
-    await db('audit_logs').insert({
-      user_id: decoded.id,
-      action: 'REJECT_MEMBER',
-      entity_type: 'member',
-      entity_id: id,
-      new_values: { reason },
-      created_at: new Date()
-    });
-
-    res.json(member);
+    res.json(updated);
   } catch (error) {
-    console.error('Error rejecting member:', error);
-    res.status(500).json({ error: 'Failed to reject member' });
+    console.error('Error updating member:', error);
+    res.status(500).json({ error: 'Failed to update member' });
   }
 });
 
@@ -292,6 +377,70 @@ app.get('/api/card-templates', async (req, res) => {
   } catch (error) {
     console.error('Error fetching card templates:', error);
     res.status(500).json({ error: 'Failed to fetch card templates' });
+  }
+});
+
+// Delete member (admin only)
+app.delete('/api/members/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const decoded = jwt.verify(token, config.JWT_SECRET) as any;
+
+    // Check if user is admin
+    if (decoded.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can delete members' });
+    }
+
+    // Soft delete the member
+    const [deletedMember] = await db('members')
+      .where({ id })
+      .update({
+        deleted_at: new Date(),
+        deleted_by: decoded.id
+      })
+      .returning('*');
+
+    if (!deletedMember) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    // Log the deletion
+    await db('audit_logs').insert({
+      user_id: decoded.id,
+      action: 'DELETE_MEMBER',
+      entity_type: 'member',
+      entity_id: id,
+      details: JSON.stringify({
+        member_number: deletedMember.member_number,
+        member_name: `${deletedMember.first_name} ${deletedMember.last_name}`
+      }),
+      created_at: new Date()
+    });
+
+    res.json({ message: 'Member deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting member:', error);
+    res.status(500).json({ error: 'Failed to delete member' });
+  }
+});
+
+// Update your GET /members endpoint to exclude deleted members
+app.get('/api/members', async (req, res) => {
+  try {
+    const members = await db('members')
+      .whereNull('deleted_at') // Only get non-deleted members
+      .orderBy('created_at', 'desc');
+    
+    res.json(members);
+  } catch (error) {
+    console.error('Error fetching members:', error);
+    res.status(500).json({ error: 'Failed to fetch members' });
   }
 });
 

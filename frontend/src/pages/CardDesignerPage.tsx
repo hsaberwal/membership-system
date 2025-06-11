@@ -4,12 +4,8 @@ import { api } from '../services/api';
 import toast from 'react-hot-toast';
 import { Navigation } from '../components/Navigation';
 import { AdminOnly } from '../components/RoleBasedAccess';
+import type { Member, MembershipType } from '../types/index.js';
 
-interface MembershipType {
-  id: string;
-  name: string;
-  fee: number;
-}
 
 export function CardDesignerPage() {
   const navigate = useNavigate();

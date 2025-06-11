@@ -1,0 +1,129 @@
+import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { api } from '../services/api';
+import toast from 'react-hot-toast';
+import { Navigation } from '../components/Navigation';
+import { Member, MembershipType } from '../types';
+
+interface Member {
+  id: string;
+  member_number: string;
+  first_name: string;
+  last_name: string;
+  membership_type_name: string;
+  status: string;
+  aml_check_status?: string;
+  created_at: string;
+}
+
+export function MembersPage() {
+  const navigate = useNavigate();
+  const [members, setMembers] = useState<Member[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    fetchMembers();
+  }, []);
+
+  const fetchMembers = async () => {
+    try {
+      const response = await api.get('/members');
+      setMembers(response.data);
+    } catch (error) {
+      toast.error('Failed to fetch members');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'approved': return 'text-green-600 bg-green-100';
+      case 'pending': return 'text-yellow-600 bg-yellow-100';
+      case 'rejected': return 'text-red-600 bg-red-100';
+      default: return 'text-gray-600 bg-gray-100';
+    }
+  };
+
+  const getAMLStatusColor = (status?: string) => {
+  switch (status) {
+    case 'clear': return 'text-green-600 bg-green-100';
+    case 'match': return 'text-red-600 bg-red-100';
+    case 'error': return 'text-gray-600 bg-gray-100';
+    default: return 'text-gray-400 bg-gray-50';
+  }
+};
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <Navigation title="Member Management" />
+      <main className="p-6">
+        {isLoading ? (
+          <div className="text-center py-12">Loading members...</div>
+        ) : members.length === 0 ? (
+          <div className="text-center py-12">
+            <p className="text-gray-500 mb-4">No members found</p>
+            <button onClick={() => navigate('/members/new')} className="btn btn-primary">
+              Add First Member
+            </button>
+          </div>
+        ) : (
+          <div className="bg-white shadow rounded-lg overflow-hidden">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Member Number
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Name
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Type
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    AML Check
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Created
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {members.map((member) => (
+                  <tr key={member.id} className="hover:bg-gray-50 cursor-pointer">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                      {member.member_number}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {member.first_name} {member.last_name}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {member.membership_type_name}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusColor(member.status)}`}>
+                        {member.status}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getAMLStatusColor(member.aml_check_status)}`}>
+                        {member.aml_check_status || 'pending'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {new Date(member.created_at).toLocaleDateString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}

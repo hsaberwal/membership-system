@@ -12,6 +12,7 @@ import { EventsPage } from './pages/EventsPage';
 import { EventCheckInPage } from './pages/EventCheckInPage';
 import { UserManagementPage } from './pages/UserManagementPage';
 import { AuditLogsPage } from './pages/AuditLogsPage';
+import { MemberDetailPage } from './pages/MemberDetailPage';
 
 const queryClient = new QueryClient();
 
@@ -33,6 +34,7 @@ function App() {
             <Route path="/events/:id/checkin" element={<EventCheckInPage />} />
             <Route path="/users" element={<UserManagementPage />} />
             <Route path="/audit-logs" element={<AuditLogsPage />} />
+            <Route path="/members/:id" element={<MemberDetailPage />} />
           </Routes>
           <Toaster position="top-right" />
         </div>
