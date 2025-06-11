@@ -8,6 +8,7 @@ import { db, initializeDatabase } from './database';
 import { loqateService } from './services/loqateService';
 import { smartSearchService } from './services/smartSearchService';
 import { auditLogger } from './middlewares/auditLogger';
+import { generateNextMemberNumber } from './utils/generateNextMemberNumber';
 // import routes from './routes';
 
 const app = express();
@@ -142,16 +143,7 @@ app.post('/api/members', async (req, res) => {
     console.log('AML check result:', amlResult);
 
     // Generate member number
-    const lastMember = await db('members')
-      .where('member_number', 'like', `${membershipType.id_prefix}%`)
-      .orderBy('member_number', 'desc')
-      .first();
-
-    let nextNumber = membershipType.id_prefix;
-    if (lastMember) {
-      const lastNum = parseInt(lastMember.member_number);
-      nextNumber = (lastNum + 1).toString();
-    }
+    const nextNumber = await generateNextMemberNumber(membershipType.id);
 
     // Create member
     const [member] = await db('members').insert({
